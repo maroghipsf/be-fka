@@ -15,9 +15,9 @@ const roleRoutes = require('./routes/roleRoutes');
 const userRoutes = require('./routes/userRoutes');
 const purchaseOrderRoutes = require('./routes/purchaseOrderRoutes');
 const workOrderRoutes = require('./routes/workOrderRoutes');
-const transactionRoutes = require('./routes/transactionRoutes');
 const interestConfigurationRoutes = require('./routes/interestConfigurationRoutes');
 const taxConfigurationRoutes = require('./routes/taxConfigurationRoutes');
+const transactionRoutes = require('./routes/transactionRoutes');
 
 app.use(express.json());
 app.use(cors());
@@ -32,9 +32,9 @@ app.use('/api/roles', roleRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/purchase-orders', purchaseOrderRoutes);
 app.use('/api/work-orders', workOrderRoutes);
-app.use('/api/transactions', transactionRoutes);
-app.use('/api/interest-configurations', interestConfigurationRoutes);
+app.use('/api/interest-configs', interestConfigurationRoutes);
 app.use('/api/tax-configurations', taxConfigurationRoutes);
+app.use('/api/transactions', transactionRoutes);
 
 app.get('/', (req, res) => {
   res.send('Finance App is running 🚀');

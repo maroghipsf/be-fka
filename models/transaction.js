@@ -50,14 +50,19 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       comment: 'Tanggal dan waktu transaksi'
     },
+    transaction_type: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      comment: 'Jenis transaksi (Transfer, Interest Expense, Payment, dsb)'
+    },
     description: {
       type: DataTypes.TEXT,
       comment: 'Deskripsi singkat transaksi'
     },
-    reference_number: {
-      type: DataTypes.STRING(100),
-      unique: true,
-      comment: 'Nomor referensi eksternal (PO, WO, Invoice, Bank Ref)'
+    total_amount: {
+      type: DataTypes.DECIMAL(18, 2),
+      allowNull: false,
+      comment: 'Total nominal transaksi (misal: pokok transfer, biaya bunga, dsb)'
     },
     created_by: {
       type: DataTypes.UUID,

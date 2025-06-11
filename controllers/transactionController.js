@@ -1,434 +1,299 @@
 const responseHandler = require('../utils/responseHandler');
-const { Transaction, TransactionEntry, Account, User, sequelize } = require('../models');
+const { Account, Transaction, TransactionEntry, User, InterestConfiguration, AccountInterestPeriod, sequelize } = require('../models');
 const { Op } = require('sequelize');
 
-// --- FUNGSI UNTUK MEMBUAT TRANSAKSI BARU BESERTA ENTRI-NYA ---
-exports.createTransaction = async (req, res) => {
-  const t = await sequelize.transaction(); // Mulai transaksi
+// Transfer Dana (Pokok + Opsional Bunga)
+exports.transferFunds = async (req, res) => {
+  const t = await sequelize.transaction();
   try {
     const {
-      transaction_date,
-      transaction_type, // e.g., 'Payment', 'Receipt', 'Transfer', 'Journal'
+      source_account_id,
+      destination_account_id,
+      amount,
       description,
-      notes,
       created_by,
-      entries // Array of { account_id, amount, entry_type, description (for entry) }
+      apply_interest, // boolean
+      interest_config_id, // opsional
+      interest_start_date, // opsional
+      interest_end_date // opsional
     } = req.body;
-
-    // --- Validasi Input Wajib ---
-    if (!transaction_date || !transaction_type || !created_by || !entries || entries.length === 0) {
+    // --- Validasi input wajib ---
+    if (!source_account_id || !destination_account_id || !amount || !created_by) {
       await t.rollback();
-      return responseHandler(res, 400, 'error', 'Tanggal, jenis transaksi, pembuat, dan detail entri wajib diisi.', null, {
-        fields: ['transaction_date', 'transaction_type', 'created_by', 'entries'],
+      return responseHandler(res, 400, 'error', 'Akun sumber, akun tujuan, jumlah, dan user wajib diisi.', null, {
+        fields: ['source_account_id', 'destination_account_id', 'amount', 'created_by'],
         message: 'Missing required fields',
       });
     }
-
-    // --- Validasi Keberadaan User (created_by) ---
-    const user = await User.findByPk(created_by, { transaction: t });
+    if (source_account_id === destination_account_id) {
+      await t.rollback();
+      return responseHandler(res, 400, 'error', 'Akun sumber dan tujuan tidak boleh sama.', null, {
+        fields: ['source_account_id', 'destination_account_id'],
+        message: 'Source and destination accounts must be different',
+      });
+    }
+    if (amount <= 0) {
+      await t.rollback();
+      return responseHandler(res, 400, 'error', 'Jumlah transfer harus lebih dari nol.', null, {
+        fields: ['amount'],
+        message: 'Amount must be positive',
+      });
+    }
+    // --- Validasi akun dan user ---
+    const [source, destination, user] = await Promise.all([
+      Account.findByPk(source_account_id, { transaction: t }),
+      Account.findByPk(destination_account_id, { transaction: t }),
+      User.findByPk(created_by, { transaction: t })
+    ]);
+    if (!source || !destination) {
+      await t.rollback();
+      return responseHandler(res, 404, 'fail', 'Akun sumber atau tujuan tidak ditemukan.');
+    }
     if (!user) {
       await t.rollback();
-      return responseHandler(res, 404, 'fail', `Pengguna dengan ID ${created_by} tidak ditemukan.`, null, {
-        fields: ['created_by'],
-        message: 'User not found',
+      return responseHandler(res, 404, 'fail', 'User tidak ditemukan.');
+    }
+    if (parseFloat(source.current_balance) < parseFloat(amount)) {
+      await t.rollback();
+      return responseHandler(res, 400, 'error', 'Saldo akun sumber tidak mencukupi.', null, {
+        fields: ['amount'],
+        message: 'Insufficient balance',
       });
     }
 
-    let totalAmount = 0; // Total amount for the main transaction header
-    const transactionEntriesData = [];
-
-    // --- Validasi dan Proses Entri Transaksi ---
-    for (const entry of entries) {
-      if (!entry.account_id || entry.amount === undefined || !entry.entry_type) {
-        await t.rollback();
-        return responseHandler(res, 400, 'error', 'Setiap entri transaksi wajib memiliki ID akun, jumlah, dan jenis entri (debit/kredit).', null, {
-          fields: ['entries'],
-          message: 'Invalid entry detail',
-        });
-      }
-      if (entry.amount <= 0) {
-        await t.rollback();
-        return responseHandler(res, 400, 'error', 'Jumlah entri harus lebih dari nol.', null, {
-          fields: ['entries'],
-          message: 'Entry amount must be positive',
-        });
-      }
-      if (!['debit', 'credit'].includes(entry.entry_type.toLowerCase())) {
-        await t.rollback();
-        return responseHandler(res, 400, 'error', 'Jenis entri harus "debit" atau "credit".', null, {
-          fields: ['entries.entry_type'],
-          message: 'Invalid entry type',
-        });
-      }
-
-      const account = await Account.findByPk(entry.account_id, { transaction: t });
-      if (!account) {
-        await t.rollback();
-        return responseHandler(res, 404, 'fail', `Akun dengan ID ${entry.account_id} tidak ditemukan untuk entri.`, null, {
-          fields: ['entries.account_id'],
-          message: 'Account not found for entry',
-        });
-      }
-
-      transactionEntriesData.push({
-        account_id: entry.account_id,
-        amount: entry.amount,
-        entry_type: entry.entry_type,
-        description: entry.description,
-      });
-
-      // Untuk total_amount di header, kita bisa pakai total debit/kredit yang sama
-      // Atau bisa juga total dari salah satu sisi jika ini transaksi sederhana (misal: payment)
-      // Untuk fleksibilitas, saya akan menggunakan total jumlah dari semua entri.
-      totalAmount += entry.amount;
-    }
-
-    // --- Buat Transaksi Header ---
-    const newTransaction = await Transaction.create({
-      transaction_date,
-      transaction_type,
-      description,
-      total_amount: totalAmount, // Total dari semua entri
-      notes,
+    // --- Buat transaksi pokok transfer ---
+    const transferTransaction = await Transaction.create({
+      transaction_date: new Date(),
+      transaction_type: 'Transfer',
+      description: description || `Transfer dari ${source.account_name} ke ${destination.account_name}`,
       created_by,
+      total_amount: amount // Tambahkan total_amount jika diperlukan oleh model/migrasi
     }, { transaction: t });
 
-    // --- Buat Transaction Entries ---
-    const entriesToCreate = transactionEntriesData.map(entry => ({
-      ...entry,
-      transaction_id: newTransaction.transaction_id,
-    }));
-    await TransactionEntry.bulkCreate(entriesToCreate, { transaction: t });
-
-    // --- Update Saldo Akun ---
-    for (const entry of entriesToCreate) {
-        const account = await Account.findByPk(entry.account_id, { transaction: t });
-        if (account) {
-            let newBalance = parseFloat(account.balance);
-            if (entry.entry_type.toLowerCase() === 'debit') {
-                newBalance += parseFloat(entry.amount);
-            } else { // 'credit'
-                newBalance -= parseFloat(entry.amount);
-            }
-            await Account.update({ balance: newBalance }, { where: { account_id: account.account_id }, transaction: t });
-        }
-    }
-
-    await t.commit(); // Commit transaksi
-
-    // Ambil transaksi lengkap dengan entri dan relasi untuk respons
-    const createdTransactionWithDetails = await Transaction.findByPk(newTransaction.transaction_id, {
-      include: [
-        { model: User, as: 'creator', attributes: ['user_id', 'username'] },
-        {
-          model: TransactionEntry,
-          as: 'entries',
-          include: [{ model: Account, as: 'account', attributes: ['account_id', 'account_name', 'account_number'] }],
-        },
-      ],
-    });
-
-    return responseHandler(res, 201, 'success', 'Transaksi berhasil ditambahkan.', createdTransactionWithDetails);
-  } catch (error) {
-    await t.rollback(); // Rollback jika ada error
-    console.error('Error creating transaction:', error);
-    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat menambahkan transaksi.', null, error.message);
-  }
-};
-
-// --- FUNGSI UNTUK MENDAPATKAN SEMUA TRANSAKSI ---
-exports.getAllTransactions = async (req, res) => {
-  try {
-    const { page = 1, limit = 10, type, accountId, startDate, endDate, userId } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-
-    const whereClause = {};
-    if (type) whereClause.transaction_type = type;
-    if (userId) whereClause.created_by = userId;
-    if (startDate || endDate) {
-      whereClause.transaction_date = {};
-      if (startDate) whereClause.transaction_date[Op.gte] = new Date(startDate);
-      if (endDate) whereClause.transaction_date[Op.lte] = new Date(endDate);
-    }
-
-    // Filter by account_id in entries (requires a separate join condition or subquery)
-    const includeConditions = [
-      { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+    // --- Buat entri debit/kredit ---
+    await TransactionEntry.bulkCreate([
       {
-        model: TransactionEntry,
-        as: 'entries',
-        include: [{ model: Account, as: 'account', attributes: ['account_id', 'account_name', 'account_number'] }],
+        transaction_id: transferTransaction.transaction_id,
+        account_id: source_account_id,
+        amount: amount,
+        entry_type: 'Credit',
+        description: 'Transfer keluar',
+        related_entity_type: 'Transfer',
+        related_entity_id: destination_account_id
       },
-    ];
-
-    if (accountId) {
-      // Find transactions that have an entry for the specific accountId
-      const transactionsWithAccount = await TransactionEntry.findAll({
-        where: { account_id: accountId },
-        attributes: ['transaction_id'],
-        group: ['transaction_id'],
-        raw: true,
-        transaction: null // Ensure this subquery doesn't affect the main transaction
-      });
-      const transactionIds = transactionsWithAccount.map(t => t.transaction_id);
-      whereClause.transaction_id = { [Op.in]: transactionIds };
-    }
-
-    const { count, rows: transactions } = await Transaction.findAndCountAll({
-      where: whereClause,
-      include: includeConditions,
-      order: [['transaction_date', 'DESC']],
-      limit: parseInt(limit),
-      offset: offset,
-    });
-
-    if (!transactions || transactions.length === 0) {
-      return responseHandler(res, 404, 'fail', 'Tidak ada data transaksi ditemukan.');
-    }
-
-    const meta = {
-      totalItems: count,
-      totalPages: Math.ceil(count / parseInt(limit)),
-      currentPage: parseInt(page),
-      itemsPerPage: parseInt(limit),
-    };
-
-    return responseHandler(res, 200, 'success', 'Data transaksi berhasil ditemukan.', transactions, null, meta);
-  } catch (error) {
-    console.error('Error fetching all transactions:', error);
-    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat mengambil data transaksi.', null, error.message);
-  }
-};
-
-// --- FUNGSI UNTUK MENDAPATKAN TRANSAKSI BERDASARKAN ID ---
-exports.getTransactionById = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const transaction = await Transaction.findByPk(id, {
-      include: [
-        { model: User, as: 'creator', attributes: ['user_id', 'username'] },
-        {
-          model: TransactionEntry,
-          as: 'entries',
-          include: [{ model: Account, as: 'account', attributes: ['account_id', 'account_name', 'account_number'] }],
-        },
-      ],
-    });
-
-    if (!transaction) {
-      return responseHandler(res, 404, 'fail', `Transaksi dengan ID ${id} tidak ditemukan.`);
-    }
-
-    return responseHandler(res, 200, 'success', 'Transaksi berhasil ditemukan.', transaction);
-  } catch (error) {
-    console.error('Error fetching transaction by ID:', error);
-    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat mengambil data transaksi.', null, error.message);
-  }
-};
-
-// --- FUNGSI UNTUK MEMPERBARUI TRANSAKSI (SANGAT KOMPLEKS, PERLU KEHATI-HATIAN) ---
-// Catatan: Memperbarui transaksi keuangan seringkali sangat kompleks karena melibatkan perubahan saldo akun.
-// Idealnya, transaksi yang sudah dicatat tidak diupdate, melainkan dibuat transaksi koreksi/reversal.
-// Namun, jika memang diperlukan, logika di bawah ini adalah pendekatan dasar.
-exports.updateTransaction = async (req, res) => {
-  const t = await sequelize.transaction();
-  try {
-    const { id } = req.params;
-    const {
-      transaction_date,
-      transaction_type,
-      description,
-      notes,
-      entries // Array of { transaction_entry_id (opsional), account_id, amount, entry_type, description }
-    } = req.body;
-
-    const transaction = await Transaction.findByPk(id, { include: [{ model: TransactionEntry, as: 'entries' }], transaction: t });
-    if (!transaction) {
-      await t.rollback();
-      return responseHandler(res, 404, 'fail', `Transaksi dengan ID ${id} tidak ditemukan.`);
-    }
-
-    // --- Reversal Saldo Akun Lama ---
-    for (const oldEntry of transaction.entries) {
-      const account = await Account.findByPk(oldEntry.account_id, { transaction: t });
-      if (account) {
-        let newBalance = parseFloat(account.balance);
-        if (oldEntry.entry_type.toLowerCase() === 'debit') {
-          newBalance -= parseFloat(oldEntry.amount); // Balikkan debit
-        } else { // 'credit'
-          newBalance += parseFloat(oldEntry.amount); // Balikkan kredit
-        }
-        await Account.update({ balance: newBalance }, { where: { account_id: account.account_id }, transaction: t });
+      {
+        transaction_id: transferTransaction.transaction_id,
+        account_id: destination_account_id,
+        amount: amount,
+        entry_type: 'Debit',
+        description: 'Transfer masuk',
+        related_entity_type: 'Transfer',
+        related_entity_id: source_account_id
       }
-    }
+    ], { transaction: t });
 
-    // --- Hapus semua entri lama ---
-    await TransactionEntry.destroy({ where: { transaction_id: id }, transaction: t });
+    // --- Update saldo akun ---
+    await source.update({ current_balance: parseFloat(source.current_balance) - parseFloat(amount) }, { transaction: t });
+    await destination.update({ current_balance: parseFloat(destination.current_balance) + parseFloat(amount) }, { transaction: t });
 
-    let calculatedTotalAmount = 0;
-    const newTransactionEntriesData = [];
-
-    // --- Validasi dan Proses Entri Transaksi Baru ---
-    if (entries && entries.length > 0) {
-      for (const entry of entries) {
-        if (!entry.account_id || entry.amount === undefined || !entry.entry_type) {
-          await t.rollback();
-          return responseHandler(res, 400, 'error', 'Setiap entri transaksi wajib memiliki ID akun, jumlah, dan jenis entri (debit/kredit).', null, {
-            fields: ['entries'],
-            message: 'Invalid entry detail',
-          });
-        }
-        if (entry.amount <= 0) {
-          await t.rollback();
-          return responseHandler(res, 400, 'error', 'Jumlah entri harus lebih dari nol.', null, {
-            fields: ['entries'],
-            message: 'Entry amount must be positive',
-          });
-        }
-        if (!['debit', 'credit'].includes(entry.entry_type.toLowerCase())) {
-          await t.rollback();
-          return responseHandler(res, 400, 'error', 'Jenis entri harus "debit" atau "credit".', null, {
-            fields: ['entries.entry_type'],
-            message: 'Invalid entry type',
-          });
-        }
-
-        const account = await Account.findByPk(entry.account_id, { transaction: t });
-        if (!account) {
-          await t.rollback();
-          return responseHandler(res, 404, 'fail', `Akun dengan ID ${entry.account_id} tidak ditemukan untuk entri.`, null, {
-            fields: ['entries.account_id'],
-            message: 'Account not found for entry',
-          });
-        }
-
-        calculatedTotalAmount += entry.amount;
-        newTransactionEntriesData.push({
-          account_id: entry.account_id,
-          amount: entry.amount,
-          entry_type: entry.entry_type,
-          description: entry.description,
+    let interestPeriod = null;
+    let interestTransaction = null;
+    if (apply_interest && source.account_type === 'Modal' && destination.account_type === 'Operasional') {
+      // --- Validasi bunga ---
+      if (!interest_config_id || !interest_start_date || !interest_end_date) {
+        await t.rollback();
+        return responseHandler(res, 400, 'error', 'Semua field bunga wajib diisi jika bunga diterapkan.', null, {
+          fields: ['interest_config_id', 'interest_start_date', 'interest_end_date'],
+          message: 'Interest fields required',
         });
       }
-    } else {
-        // Jika tidak ada entri baru, total amount menjadi 0
-        calculatedTotalAmount = 0;
-    }
-
-
-    // --- Buat Entri Transaksi Baru ---
-    if (newTransactionEntriesData.length > 0) {
-        const entriesToCreate = newTransactionEntriesData.map(entry => ({
-            ...entry,
-            transaction_id: id,
-        }));
-        await TransactionEntry.bulkCreate(entriesToCreate, { transaction: t });
-
-        // --- Perbarui Saldo Akun dengan Entri Baru ---
-        for (const entry of entriesToCreate) {
-            const account = await Account.findByPk(entry.account_id, { transaction: t });
-            if (account) {
-                let currentBalance = parseFloat(account.balance);
-                if (entry.entry_type.toLowerCase() === 'debit') {
-                    currentBalance += parseFloat(entry.amount);
-                } else { // 'credit'
-                    currentBalance -= parseFloat(entry.amount);
-                }
-                await Account.update({ balance: currentBalance }, { where: { account_id: account.account_id }, transaction: t });
-            }
-        }
-    }
-
-    // --- Update Transaksi Header ---
-    await Transaction.update(
-      {
-        transaction_date: transaction_date || transaction.transaction_date,
-        transaction_type: transaction_type || transaction.transaction_type,
-        description: description || transaction.description,
-        total_amount: calculatedTotalAmount, // Perbarui total amount berdasarkan entri baru
-        notes: notes !== undefined ? notes : transaction.notes,
-      },
-      {
-        where: { transaction_id: id },
-        transaction: t,
+      const interestConfig = await InterestConfiguration.findOne({ where: { interest_config_id, is_active: 1 }, transaction: t });
+      if (!interestConfig) {
+        await t.rollback();
+        return responseHandler(res, 404, 'fail', 'Konfigurasi bunga tidak ditemukan atau tidak aktif.');
       }
-    );
+      // --- Buat AccountInterestPeriod ---
+      interestPeriod = await AccountInterestPeriod.create({
+        account_id: source_account_id,
+        interest_config_id,
+        start_date: interest_start_date,
+        end_date: interest_end_date,
+        initial_transfer_transaction_id: transferTransaction.transaction_id,
+        principal_amount: amount,
+        status: 'Active' // Set status default agar tidak null
+      }, { transaction: t });
+      // --- Hitung bunga total (flat, untuk contoh, bisa disesuaikan dengan calculation_type) ---
+      const days = (new Date(interest_end_date) - new Date(interest_start_date)) / (1000 * 60 * 60 * 24) + 1;
+      let interestAmount = 0;
+      if (interestConfig.calculation_type === 'Annual') {
+        // Hitung bunga tahunan
+        interestAmount = (((parseFloat(interestConfig.rate_percentage) / 12) * parseFloat(amount)) * 2);
+      }else if (interestConfig.calculation_type === 'Monthly') {
+        // Hitung jumlah bulan penuh
+        const start = new Date(interest_start_date);
+        const end = new Date(interest_end_date);
+        let months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth()) + 1;
+        interestAmount = parseFloat(amount) * parseFloat(interestConfig.rate_percentage) * months;
+      } else {
+        // Default: harian
+        interestAmount = parseFloat(amount) * parseFloat(interestConfig.rate_percentage) * days;
+      }
+      // --- Buat transaksi biaya bunga ---
+      interestTransaction = await Transaction.create({
+        transaction_date: new Date(),
+        transaction_type: 'Interest Expense',
+        description: `Biaya bunga transfer dari ${source.account_name} ke ${destination.account_name}`,
+        created_by,
+        total_amount: interestAmount // Tambahkan total_amount jika diperlukan oleh model/migrasi
+      }, { transaction: t });
+      await TransactionEntry.create({
+        transaction_id: interestTransaction.transaction_id,
+        account_id: source_account_id,
+        amount: interestAmount,
+        entry_type: 'Credit',
+        description: 'Biaya bunga transfer',
+        related_entity_type: 'Interest Expense',
+        related_entity_id: interestPeriod.account_interest_id
+      }, { transaction: t });
+      // --- Update saldo akun sumber (potong bunga) ---
+      await source.update({ current_balance: parseFloat(source.current_balance) - interestAmount }, { transaction: t });
+    }
 
     await t.commit();
-
-    // Ambil transaksi lengkap setelah update untuk respons
-    const updatedTransactionWithDetails = await Transaction.findByPk(id, {
-      include: [
-        { model: User, as: 'creator', attributes: ['user_id', 'username'] },
-        {
-          model: TransactionEntry,
-          as: 'entries',
-          include: [{ model: Account, as: 'account', attributes: ['account_id', 'account_name', 'account_number'] }],
-        },
-      ],
+    return responseHandler(res, 201, 'success', 'Transfer dana berhasil.', {
+      transferTransaction,
+      interestPeriod,
+      interestTransaction
     });
-
-    return responseHandler(res, 200, 'success', 'Transaksi berhasil diperbarui.', updatedTransactionWithDetails);
   } catch (error) {
     await t.rollback();
-    console.error('Error updating transaction:', error);
-    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat memperbarui transaksi.', null, error.message);
+    console.error('Error during transferFunds:', error);
+    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat transfer dana.', null, error.message);
   }
 };
 
-// --- FUNGSI UNTUK MENGHAPUS TRANSAKSI ---
-exports.deleteTransaction = async (req, res) => {
-  const t = await sequelize.transaction();
+// --- GET ALL TRANSFER TRANSACTIONS ---
+exports.getAllTransfers = async (req, res) => {
+  try {
+    // Ambil semua transaksi dengan tipe 'Transfer'
+    const transfers = await Transaction.findAll({
+      where: { transaction_type: 'Transfer' },
+      include: [
+        {
+          model: TransactionEntry,
+          as: 'entries',
+          include: [
+            { model: Account, as: 'account', attributes: ['account_id', 'account_name', 'account_type'] }
+          ]
+        },
+        { model: User, as: 'creator', attributes: ['user_id', 'username'] }
+      ],
+      order: [['transaction_date', 'DESC']]
+    });
+
+    // Format data untuk frontend
+    const data = transfers.map(trx => {
+      // Ambil entry debit dan kredit
+      const debitEntry = trx.entries.find(e => e.entry_type.toLowerCase() === 'debit');
+      const creditEntry = trx.entries.find(e => e.entry_type.toLowerCase() === 'credit');
+      return {
+        transfer_id: trx.transaction_id,
+        transfer_date: trx.transaction_date,
+        source_account_id: creditEntry ? creditEntry.account_id : null,
+        source_account_name: creditEntry && creditEntry.account ? creditEntry.account.account_name : '',
+        destination_account_id: debitEntry ? debitEntry.account_id : null,
+        destination_account_name: debitEntry && debitEntry.account ? debitEntry.account.account_name : '',
+        amount: trx.total_amount,
+        description: trx.description,
+        status: 'success', // Atur sesuai kebutuhan, misal draft/success
+        created_by: trx.created_by,
+        created_by_username: trx.creator ? trx.creator.username : ''
+      };
+    });
+
+    return responseHandler(res, 200, 'success', 'Data transfer berhasil ditemukan.', data);
+  } catch (error) {
+    console.error('Error fetching transfer list:', error);
+    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat mengambil data transfer.', null, error.message);
+  }
+};
+
+// --- GET DETAIL TRANSFER BY ID ---
+exports.getTransferDetail = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const transaction = await Transaction.findByPk(id, { include: [{ model: TransactionEntry, as: 'entries' }], transaction: t });
-    if (!transaction) {
-      await t.rollback();
-      return responseHandler(res, 404, 'fail', `Transaksi dengan ID ${id} tidak ditemukan.`);
-    }
-
-    // --- Balikkan Saldo Akun sebelum menghapus entri ---
-    for (const entry of transaction.entries) {
-      const account = await Account.findByPk(entry.account_id, { transaction: t });
-      if (account) {
-        let newBalance = parseFloat(account.balance);
-        if (entry.entry_type.toLowerCase() === 'debit') {
-          newBalance -= parseFloat(entry.amount); // Balikkan debit
-        } else { // 'credit'
-          newBalance += parseFloat(entry.amount); // Balikkan kredit
+    // Ambil transaksi transfer utama
+    const trx = await Transaction.findByPk(id, {
+      include: [
+        {
+          model: TransactionEntry,
+          as: 'entries',
+          include: [
+            { model: Account, as: 'account', attributes: ['account_id', 'account_name', 'account_type'] }
+          ]
+        },
+        { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+        {
+          model: AccountInterestPeriod,
+          as: 'interestPeriods',
+          include: [
+            { model: InterestConfiguration, as: 'interestConfiguration', attributes: ['config_name', 'rate_percentage', 'calculation_type'] }
+          ]
         }
-        await Account.update({ balance: newBalance }, { where: { account_id: account.account_id }, transaction: t });
+      ]
+    });
+    if (!trx) {
+      return responseHandler(res, 404, 'fail', 'Data transfer tidak ditemukan.');
+    }
+    // Ambil entry debit/kredit
+    const debitEntry = trx.entries.find(e => e.entry_type.toLowerCase() === 'debit');
+    const creditEntry = trx.entries.find(e => e.entry_type.toLowerCase() === 'credit');
+    // Ambil data bunga jika ada
+    const interestPeriod = trx.interestPeriods && trx.interestPeriods.length > 0 ? trx.interestPeriods[0] : null;
+    let bunga = null;
+    if (interestPeriod) {
+      let interestAmount = 0;
+      if (interestPeriod.interestConfiguration.calculation_type === 'Annual') {
+        // Hitung bunga tahunan
+        interestAmount = (((parseFloat(interestPeriod.interestConfiguration.rate_percentage) / 12) * parseFloat(interestPeriod.principal_amount)) * 2);
+      }else if (interestPeriod.interestConfiguration.calculation_type === 'Monthly') {
+        // Hitung jumlah bulan penuh
+        const start = new Date(interest_start_date);
+        const end = new Date(interest_end_date);
+        let months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth()) + 1;
+        interestAmount = parseFloat(interestPeriod.principal_amount) * parseFloat(interestPeriod.interestConfiguration.rate_percentage) * months;
+      } else {
+        // Default: harian
+        interestAmount = parseFloat(interestPeriod.principal_amount) * parseFloat(interestPeriod.interestConfiguration.rate_percentage) * days;
       }
+      bunga = {
+        interest_config_name: interestPeriod.interestConfiguration ? interestPeriod.interestConfiguration.config_name : '',
+        interest_start_date: interestPeriod.start_date,
+        interest_end_date: interestPeriod.end_date,
+        interest_rate_percentage: interestPeriod.interestConfiguration ? interestPeriod.interestConfiguration.rate_percentage : null,
+        interest_calculation_type: interestPeriod.interestConfiguration ? interestPeriod.interestConfiguration.calculation_type : '',
+        interest_amount: interestAmount.toFixed(0),
+      };
     }
-
-    // Pertama, hapus semua entri terkait transaksi ini
-    await TransactionEntry.destroy({
-      where: { transaction_id: id },
-      transaction: t,
-    });
-
-    // Kemudian, hapus header transaksi
-    const deletedRows = await Transaction.destroy({
-      where: { transaction_id: id },
-      transaction: t,
-    });
-
-    await t.commit();
-
-    if (deletedRows === 0) {
-      return responseHandler(res, 404, 'fail', `Transaksi dengan ID ${id} tidak ditemukan.`);
-    }
-
-    return responseHandler(res, 200, 'success', 'Transaksi dan entri terkait berhasil dihapus.');
+    const detail = {
+      transfer_id: trx.transaction_id,
+      transfer_date: trx.transaction_date,
+      source_account_id: creditEntry ? creditEntry.account_id : null,
+      source_account_name: creditEntry && creditEntry.account ? creditEntry.account.account_name : '',
+      destination_account_id: debitEntry ? debitEntry.account_id : null,
+      destination_account_name: debitEntry && debitEntry.account ? debitEntry.account.account_name : '',
+      amount: trx.total_amount,
+      description: trx.description,
+      status: 'success',
+      created_by: trx.created_by,
+      created_by_name: trx.creator ? trx.creator.username : '',
+      created_at: trx.created_at,
+      updated_at: trx.updated_at,
+      ...bunga
+    };
+    return responseHandler(res, 200, 'success', 'Detail transfer berhasil ditemukan.', detail);
   } catch (error) {
-    await t.rollback();
-    console.error('Error deleting transaction:', error);
-    // Tambahkan penanganan spesifik jika ada Foreign Key constraint error
-    if (error.name === 'SequelizeForeignKeyConstraintError') {
-      return responseHandler(res, 409, 'error', 'Transaksi tidak dapat dihapus karena masih terkait dengan data lain.', null, error.message);
-    }
-    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat menghapus transaksi.', null, error.message);
+    console.error('Error fetching transfer detail:', error);
+    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat mengambil detail transfer.', null, error.message);
   }
 };

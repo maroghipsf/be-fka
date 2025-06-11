@@ -10,15 +10,15 @@ router.post('/register', userController.createUser); // Bisa juga router.post('/
 router.post('/login', userController.loginUser);
 
 // Route untuk mendapatkan semua pengguna (mungkin hanya untuk admin)
-router.get('/', authMiddleware.authenticateToken, userController.getAllUsers);
+router.get('/', userController.getAllUsers);
 
 // Route untuk mendapatkan pengguna berdasarkan ID
-router.get('/:id', authMiddleware.authenticateToken, userController.getUserById);
+router.get('/:id', userController.getUserById);
 
 // Route untuk memperbarui pengguna berdasarkan ID
-router.put('/:id', authMiddleware.authenticateToken, userController.updateUser);
+router.put('/:id', userController.updateUser);
 
 // Route untuk menghapus pengguna berdasarkan ID (mungkin hanya untuk admin)
-router.delete('/:id', authMiddleware.authenticateToken, userController.deleteUser);
+router.delete('/:id', userController.deleteUser);
 
 module.exports = router;

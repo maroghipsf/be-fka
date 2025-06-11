@@ -14,9 +14,19 @@ module.exports = {
         allowNull: false,
         comment: 'Tanggal dan waktu transaksi'
       },
+      transaction_type: {
+        type: DataTypes.STRING,
+        allowNull: false,
+        comment: 'Jenis transaksi (Transfer, Interest Expense, Payment, dsb)'
+      },
       description: {
         type: Sequelize.TEXT,
         comment: 'Deskripsi singkat transaksi'
+      },
+      total_amount: {
+        type: DataTypes.DECIMAL(18, 2),
+        allowNull: false,
+        comment: 'Total nominal transaksi (misal: pokok transfer, biaya bunga, dsb)'
       },
       reference_number: {
         type: Sequelize.STRING(100),

@@ -1,5 +1,3 @@
-// controllers/accountController.js
-
 const responseHandler = require('../utils/responseHandler');
 const { Account } = require('../models'); // Hanya perlu model Account, karena tidak ada relasi langsung ke User/AccountType di skema asli Anda
 
@@ -7,14 +5,16 @@ const { Account } = require('../models'); // Hanya perlu model Account, karena t
 exports.createAccount = async (req, res) => {
   try {
     // Sesuaikan dengan kolom yang ada di migrasi create-account.js:
-    // account_name, account_type (ENUM), currency, current_balance (default 0.00), is_active (default true)
-    const { account_name, account_type, currency } = req.body;
+    // account_name, account_type (ENUM), current_balance (default 0.00), is_active (default true)
+    // Tambahkan current_balance dari body request
+    const { account_name, account_type, current_balance } = req.body;
 
     // --- Validasi Input Sederhana ---
-    if (!account_name || !account_type || !currency) {
-      return responseHandler(res, 400, 'error', 'Nama akun, tipe akun, dan mata uang wajib diisi.', null, {
-        fields: ['account_name', 'account_type', 'currency'],
-        message: 'Missing required fields',
+    // Pastikan current_balance juga disertakan dan merupakan angka
+    if (!account_name || !account_type || current_balance === undefined || current_balance === null || isNaN(current_balance)) {
+      return responseHandler(res, 400, 'error', 'Nama akun, tipe akun, mata uang, dan saldo awal wajib diisi dengan benar.', null, {
+        fields: ['account_name', 'account_type', 'current_balance'],
+        message: 'Missing or invalid required fields',
       });
     }
 
@@ -38,16 +38,17 @@ exports.createAccount = async (req, res) => {
       });
     }
 
+    // Buat akun baru, set current_balance dengan current_balance yang diterima
     const newAccount = await Account.create({
       account_name,
       account_type,
-      currency,
-      current_balance: 0.00, // Akan mengikuti default value dari migrasi
-      is_active: true,      // Akan mengikuti default value dari migrasi
+      currency: 'IDR', // Default currency, bisa diubah jika perlu
+      current_balance, // Saldo awal dari request akan langsung jadi current_balance
+      is_active: true,                  // Akan mengikuti default value dari migrasi, atau bisa diset eksplisit
       // created_at dan last_updated_at akan otomatis diisi oleh Sequelize
     });
 
-    return responseHandler(res, 201, 'success', 'Akun berhasil ditambahkan.', newAccount);
+    return responseHandler(res, 201, 'success', 'Akun berhasil ditambahkan dengan saldo awal.', newAccount);
   } catch (error) {
     console.error('Error creating account:', error);
     // Penanganan error khusus untuk UniqueConstraintError (jika account_name dijadikan unique di migrasi)

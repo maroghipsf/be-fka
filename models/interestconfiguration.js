@@ -31,7 +31,7 @@ module.exports = (sequelize, DataTypes) => {
       comment: 'Persentase bunga (misal: 0.0125 untuk 1.25%)'
     },
     calculation_type: {
-      type: DataTypes.ENUM('Monthly', 'Daily'),
+      type: DataTypes.ENUM('Annual', 'Monthly', 'Daily'),
       allowNull: false,
       comment: 'Tipe perhitungan bunga (Bulanan atau Harian)'
     },

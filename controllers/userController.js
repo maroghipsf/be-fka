@@ -64,7 +64,7 @@ exports.createUser = async (req, res) => {
     const newUser = await User.create({
       username,
       email,
-      password: hashedPassword, // Simpan password yang sudah di-hash
+      password_hash: hashedPassword, // Simpan password yang sudah di-hash ke kolom password_hash
       role_id,
     });
 
@@ -268,7 +268,7 @@ exports.loginUser = async (req, res) => {
         if (!user) {
             return responseHandler(res, 401, 'fail', 'Email atau password salah.');
         }
-        const isMatch = await bcrypt.compare(password, user.password);
+        const isMatch = await bcrypt.compare(password, user.password_hash);
         if (!isMatch) {
             return responseHandler(res, 401, 'fail', 'Email atau password salah.');
         }
@@ -276,7 +276,7 @@ exports.loginUser = async (req, res) => {
         const token = generateToken(user.user_id, user.role.role_name);
         // Jangan kirim password di response
         const userResponse = { ...user.toJSON() };
-        delete userResponse.password;
+        delete userResponse.password_hash;
         return responseHandler(res, 200, 'success', 'Login berhasil.', { user: userResponse, token });
     } catch (error) {
         console.error('Error during user login:', error);

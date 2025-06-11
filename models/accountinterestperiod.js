@@ -76,7 +76,7 @@ module.exports = (sequelize, DataTypes) => {
   }, {
     sequelize,
     modelName: 'AccountInterestPeriod',
-    tableName: 'AccountInterestPeriods',
+    tableName: 'accountinterestperiods',
     timestamps: true,
     createdAt: 'created_at',
     updatedAt: 'last_updated_at',
