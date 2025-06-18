@@ -3,7 +3,6 @@ const { Model } = require('sequelize');
 module.exports = (sequelize, DataTypes) => {
   class Transaction extends Model {
     static associate(models) {
-      // Pastikan semua model yang direlasikan sudah ada di models dan penamaannya benar
       if (models.User) {
         Transaction.belongsTo(models.User, {
           foreignKey: 'created_by',
@@ -22,19 +21,12 @@ module.exports = (sequelize, DataTypes) => {
           as: 'interestPeriods'
         });
       }
-      if (models.WOExpense) {
-        Transaction.hasMany(models.WOExpense, {
-          foreignKey: 'transaction_id',
-          as: 'woExpenses'
-        });
-      }
       if (models.InterestAccrual) {
         Transaction.hasMany(models.InterestAccrual, {
           foreignKey: 'posted_transaction_id',
           as: 'interestAccruals'
         });
       }
-      // Tambahkan relasi lain dengan pengecekan serupa jika perlu
     }
   }
   Transaction.init({
@@ -64,9 +56,20 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: false,
       comment: 'Total nominal transaksi (misal: pokok transfer, biaya bunga, dsb)'
     },
+    reference_number: {
+      type: DataTypes.STRING(100),
+      unique: true,
+      allowNull: true,
+      comment: 'Nomor referensi eksternal (PO, WO, Invoice, Bank Ref)'
+    },
+    notes: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
     created_by: {
       type: DataTypes.UUID,
-      allowNull: false
+      allowNull: false,
+      comment: 'Foreign Key ke User yang membuat transaksi'
     }
   }, {
     sequelize,

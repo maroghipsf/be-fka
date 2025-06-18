@@ -1,5 +1,5 @@
 const responseHandler = require('../utils/responseHandler');
-const { WorkOrder, WOEntry, WOExpense, User, Item, Account, sequelize } = require('../models');
+const { WO, PO, Warehouse, sequelize } = require('../models');
 const { Op } = require('sequelize');
 
 // --- FUNGSI UNTUK MEMBUAT WORK ORDER BARU BESERTA ENTRI DAN BIAYANYA ---
@@ -7,178 +7,85 @@ exports.createWorkOrder = async (req, res) => {
   const transaction = await sequelize.transaction(); // Mulai transaksi
   try {
     const {
-      wo_number,
-      order_date,
-      description,
-      status, // 'Pending', 'In Progress', 'Completed', 'Cancelled'
-      start_date,
-      end_date,
-      total_cost, // Ini akan dihitung ulang nanti
-      notes,
-      created_by,
-      entries, // Array of { item_id, quantity, unit_price }
-      expenses // Array of { expense_name, amount, account_id, description }
+      po_id,
+      sender_warehouse_id,
+      receiver_warehouse_id,
+      scheduled_pickup_time,
+      net_weight_kg
     } = req.body;
 
     // --- Validasi Input Wajib ---
-    if (!wo_number || !order_date || !description || !created_by) {
+    if (!po_id || !sender_warehouse_id || !receiver_warehouse_id || !scheduled_pickup_time || net_weight_kg === undefined) {
       await transaction.rollback();
       return responseHandler(res, 400, 'error', 'Nomor WO, tanggal, deskripsi, dan pembuat wajib diisi.', null, {
         fields: ['wo_number', 'order_date', 'description', 'created_by'],
         message: 'Missing required fields',
       });
     }
-
-    // --- Validasi Keberadaan User (created_by) ---
-    const user = await User.findByPk(created_by, { transaction });
-    if (!user) {
+    
+    // --- Validasi sender_warehouse and receiver_warehouse ---
+    if (sender_warehouse_id == receiver_warehouse_id) {
       await transaction.rollback();
-      return responseHandler(res, 404, 'fail', `Pengguna dengan ID ${created_by} tidak ditemukan.`, null, {
-        fields: ['created_by'],
-        message: 'User not found',
+      return responseHandler(res, 400, 'error', 'Sender dan receiver warehouse harus berbeda.', null, {
+        fields: ['sender_warehouse_id', 'receiver_warehouse_id'],
+        message: 'Sender and receiver warehouse cannot be the same'});
+    }
+
+    // --- Cek party ton, jumlah net_weight_kg melebihi party_ton ---
+    const po = await PO.findByPk(po_id, { transaction });
+    if (!po) {
+      await transaction.rollback();
+      return responseHandler(res, 404, 'fail', `Purchase Order dengan ID ${po_id} tidak ditemukan.`, null, {
+        fields: ['po_id'],
+        message: 'PO not found',
       });
     }
-
-    // --- Cek Duplikasi Nomor WO ---
-    const existingWO = await WorkOrder.findOne({ where: { wo_number }, transaction });
-    if (existingWO) {
-      await transaction.rollback();
-      return responseHandler(res, 409, 'error', 'Nomor WO sudah terdaftar.', null, {
-        fields: ['wo_number'],
-        message: 'Duplicate WO Number',
+    const partyTonLimit = po.party_ton;
+    const totalNetWeight =  await WO.findOne({
+      attributes: [
+        [sequelize.fn('SUM', sequelize.col('net_weight_kg')), 'totalNetWeightForPO']
+      ],
+      where: {
+        po_id: po_id, // Filter berdasarkan po_id yang diberikan
+        net_weight_kg: {
+          [Op.ne]: null // Opsional: Hanya menjumlahkan net_weight_kg yang tidak null
+        }
+      }
+    });
+    const partySum = totalNetWeight ? parseFloat(totalNetWeight.dataValues.totalNetWeightForPO) : 0;
+    const totalParty = partySum + parseFloat(net_weight_kg);
+    if (partyTonLimit < totalParty) {
+      return responseHandler(res, 409, 'error', ' Net weight melebihi party ton.', null, {
+        fields: ['party_ton', 'net_weight_kg'],
       });
-    }
-
-    let calculatedTotalCost = 0;
-    const woEntriesData = [];
-    const woExpensesData = [];
-
-    // --- Validasi dan Hitung Total dari Entri WO ---
-    if (entries && entries.length > 0) {
-      for (const entry of entries) {
-        if (!entry.item_id || entry.quantity === undefined || entry.unit_price === undefined) {
-          await transaction.rollback();
-          return responseHandler(res, 400, 'error', 'Setiap detail entri WO wajib memiliki ID item, kuantitas, dan harga satuan.', null, {
-            fields: ['entries'],
-            message: 'Invalid entry detail',
-          });
-        }
-        if (entry.quantity <= 0 || entry.unit_price <= 0) {
-          await transaction.rollback();
-          return responseHandler(res, 400, 'error', 'Kuantitas dan harga satuan harus lebih dari nol.', null, {
-            fields: ['entries'],
-            message: 'Quantity and unit price must be positive',
-          });
-        }
-
-        const item = await Item.findByPk(entry.item_id, { transaction });
-        if (!item) {
-          await transaction.rollback();
-          return responseHandler(res, 404, 'fail', `Item dengan ID ${entry.item_id} tidak ditemukan.`, null, {
-            fields: ['entries.item_id'],
-            message: 'Item not found in entry',
-          });
-        }
-
-        const subtotal = entry.quantity * entry.unit_price;
-        calculatedTotalCost += subtotal;
-        woEntriesData.push({
-          item_id: entry.item_id,
-          quantity: entry.quantity,
-          unit_price: entry.unit_price,
-          subtotal: subtotal,
-        });
-      }
-    }
-
-    // --- Validasi dan Hitung Total dari Biaya WO ---
-    if (expenses && expenses.length > 0) {
-      for (const expense of expenses) {
-        if (!expense.expense_name || expense.amount === undefined || !expense.account_id) {
-          await transaction.rollback();
-          return responseHandler(res, 400, 'error', 'Setiap detail biaya WO wajib memiliki nama biaya, jumlah, dan ID akun.', null, {
-            fields: ['expenses'],
-            message: 'Invalid expense detail',
-          });
-        }
-        if (expense.amount <= 0) {
-          await transaction.rollback();
-          return responseHandler(res, 400, 'error', 'Jumlah biaya harus lebih dari nol.', null, {
-            fields: ['expenses'],
-            message: 'Expense amount must be positive',
-          });
-        }
-
-        const account = await Account.findByPk(expense.account_id, { transaction });
-        if (!account) {
-          await transaction.rollback();
-          return responseHandler(res, 404, 'fail', `Akun dengan ID ${expense.account_id} tidak ditemukan untuk biaya.`, null, {
-            fields: ['expenses.account_id'],
-            message: 'Account not found for expense',
-          });
-        }
-
-        calculatedTotalCost += expense.amount;
-        woExpensesData.push({
-          expense_name: expense.expense_name,
-          amount: expense.amount,
-          account_id: expense.account_id,
-          description: expense.description,
-        });
-      }
     }
 
     // --- Buat Work Order Header ---
-    const newWO = await WorkOrder.create({
-      wo_number,
-      order_date,
-      description,
-      status: status || 'Pending', // Default status
-      start_date,
-      end_date,
-      total_cost: calculatedTotalCost, // Gunakan total yang dihitung
-      notes,
-      created_by,
+    const newWO = await WO.create({
+      po_id,
+      sender_warehouse_id,
+      receiver_warehouse_id,
+      scheduled_pickup_time,
+      net_weight_kg
     }, { transaction });
-
-    // --- Buat WO Entries ---
-    if (woEntriesData.length > 0) {
-      const entriesToCreate = woEntriesData.map(entry => ({
-        ...entry,
-        work_order_id: newWO.work_order_id,
-      }));
-      await WOEntry.bulkCreate(entriesToCreate, { transaction });
+    const newWOId = newWO.wo_id;
+    if (!newWOId) {
+      await transaction.rollback();
+      return responseHandler(res, 500, 'error', 'Gagal membuat Work Order baru.', null, {
+        fields: ['wo_id'],
+        message: 'Failed to create Work Order',
+      });
     }
 
-    // --- Buat WO Expenses ---
-    if (woExpensesData.length > 0) {
-      const expensesToCreate = woExpensesData.map(expense => ({
-        ...expense,
-        work_order_id: newWO.work_order_id,
-      }));
-      await WOExpense.bulkCreate(expensesToCreate, { transaction });
-    }
-
-    await transaction.commit(); // Commit transaksi
-
-    // Ambil WO lengkap dengan entri dan biaya untuk respons
-    const createdWOWithDetails = await WorkOrder.findByPk(newWO.work_order_id, {
-      include: [
-        { model: User, as: 'creator', attributes: ['user_id', 'username'] },
-        {
-          model: WOEntry,
-          as: 'entries',
-          include: [{ model: Item, as: 'item', attributes: ['item_id', 'item_name', 'unit_of_measure'] }],
-        },
-        {
-          model: WOExpense,
-          as: 'expenses',
-          include: [{ model: Account, as: 'account', attributes: ['account_id', 'account_name', 'account_number'] }],
-        },
-      ],
+    // Jika WO berhasil dibuat, commit transaksi
+    // update PO status to 'Released'
+    await PO.update({ status_po: 'Released' }, {
+      where: { po_id },
+      transaction
     });
+    await transaction.commit(); // Commit transaksi jika semua berhasil
 
-    return responseHandler(res, 201, 'success', 'Work Order berhasil ditambahkan.', createdWOWithDetails);
+    return responseHandler(res, 201, 'success', 'Work Order berhasil dibuat.', { wo_id: newWOId });
   } catch (error) {
     await transaction.rollback(); // Rollback jika ada error
     console.error('Error creating Work Order:', error);
@@ -187,48 +94,25 @@ exports.createWorkOrder = async (req, res) => {
 };
 
 // --- FUNGSI UNTUK MENDAPATKAN SEMUA WORK ORDER ---
-exports.getAllWorkOrders = async (req, res) => {
+exports.getAllWorkOrdersByIdPO = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, woNumber, userId } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const { idPO } = req.params;
 
-    const whereClause = {};
-    if (status) whereClause.status = status;
-    if (woNumber) whereClause.wo_number = { [Op.like]: `%${woNumber}%` };
-    if (userId) whereClause.created_by = userId;
-
-    const { count, rows: workOrders } = await WorkOrder.findAndCountAll({
-      where: whereClause,
+    const wos = await WO.findAll({
+      where: { po_id: idPO },
       include: [
-        { model: User, as: 'creator', attributes: ['user_id', 'username'] },
-        {
-          model: WOEntry,
-          as: 'entries',
-          include: [{ model: Item, as: 'item', attributes: ['item_id', 'item_name', 'unit_of_measure'] }],
-        },
-        {
-          model: WOExpense,
-          as: 'expenses',
-          include: [{ model: Account, as: 'account', attributes: ['account_id', 'account_name', 'account_number'] }],
-        },
+        { model: PO, as: 'po', as: 'purchaseOrder', attributes: ['po_id', 'status_po', 'project', 'sdip_no', 'party_ton', 'po_date', 'description'] },
+        { model: Warehouse , as: 'senderWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+        { model: Warehouse , as: 'receiverWarehouse', attributes: ['warehouse_id', 'warehouse_name'] }
       ],
-      order: [['order_date', 'DESC']],
-      limit: parseInt(limit),
-      offset: offset,
+      order: [['createdAt', 'DESC']] 
     });
 
-    if (!workOrders || workOrders.length === 0) {
-      return responseHandler(res, 404, 'fail', 'Tidak ada data Work Order ditemukan.');
+    if (!wos || wos.length === 0) {
+      return responseHandler(res, 404, 'fail', 'Tidak ada data akun ditemukan.');
     }
 
-    const meta = {
-      totalItems: count,
-      totalPages: Math.ceil(count / parseInt(limit)),
-      currentPage: parseInt(page),
-      itemsPerPage: parseInt(limit),
-    };
-
-    return responseHandler(res, 200, 'success', 'Data Work Order berhasil ditemukan.', workOrders, null, meta);
+    return responseHandler(res, 200, 'success', 'Data akun berhasil ditemukan.', wos);
   } catch (error) {
     console.error('Error fetching all Work Orders:', error);
     return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat mengambil data Work Order.', null, error.message);

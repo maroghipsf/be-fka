@@ -3,20 +3,16 @@ const { Model } = require('sequelize');
 module.exports = (sequelize, DataTypes) => {
   class Warehouse extends Model {
     static associate(models) {
-      if (models.PurchaseOrder) {
-        Warehouse.hasMany(models.PurchaseOrder, {
-          foreignKey: 'warehouse_id',
-          as: 'purchaseOrders'
+      // Warehouse can be an origin for many Working Orders
+      if (models.WO) { // Use models.WO if your WO model is named 'WO'
+        Warehouse.hasMany(models.WO, {
+          foreignKey: 'sender_warehouse_id', // Correct foreign key from WO
+          as: 'sentWorkingOrders' // More descriptive alias
         });
-      }
-      if (models.WorkingOrder) {
-        Warehouse.hasMany(models.WorkingOrder, {
-          foreignKey: 'origin_warehouse_id',
-          as: 'originWorkingOrders'
-        });
-        Warehouse.hasMany(models.WorkingOrder, {
-          foreignKey: 'destination_warehouse_id',
-          as: 'destinationWorkingOrders'
+        // Warehouse can be a destination for many Working Orders
+        Warehouse.hasMany(models.WO, {
+          foreignKey: 'receiver_warehouse_id', // Correct foreign key from WO
+          as: 'receivedWorkingOrders' // More descriptive alias
         });
       }
     }

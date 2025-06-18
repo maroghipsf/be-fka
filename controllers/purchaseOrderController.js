@@ -1,5 +1,5 @@
 const responseHandler = require('../utils/responseHandler');
-const { PurchaseOrder, PurchaseOrderEntry, Supplier, User, Item, sequelize, Account, Transaction, TransactionEntry } = require('../models');
+const { PurchaseOrder, PurchaseOrderEntry, Supplier, User, Item, sequelize, Account, Transaction, TransactionEntry, WorkingOrder, PoExpense, PoExpenseDetail, Warehouse } = require('../models');
 const { Op } = require('sequelize');
 
 // --- FUNGSI UNTUK MEMBUAT PURCHASE ORDER BARU BESERTA ENTRI ITEMNYA ---
@@ -7,11 +7,12 @@ exports.createPurchaseOrder = async (req, res) => {
   const transaction = await sequelize.transaction(); // Mulai transaksi
   try {
     const {
+      project,
       po_number,
-      order_date,
-      supplier_id,
+      po_date,
+      warehouse_id,
       expected_delivery_date,
-      status, // 'Pending', 'Approved', 'Rejected', 'Completed'
+      status, // 'Draft','Dibagi ke WO','Selesai','Dibatalkan'
       total_amount, // Ini akan dihitung ulang nanti
       notes,
       created_by,
@@ -19,31 +20,12 @@ exports.createPurchaseOrder = async (req, res) => {
     } = req.body;
 
     // --- Validasi Input Wajib ---
-    if (!po_number || !order_date || !supplier_id || !created_by || !entries || entries.length === 0) {
+    if (!po_number || !po_date || !created_by || !entries || entries.length === 0) {
       await transaction.rollback();
-      return responseHandler(res, 400, 'error', 'Nomor PO, tanggal, pemasok, pembuat, dan detail item wajib diisi.', null, {
-        fields: ['po_number', 'order_date', 'supplier_id', 'created_by', 'entries'],
+      return responseHandler(res, 400, 'error', 'Nomor PO, tanggal, pembuat, dan detail item wajib diisi.', null, {
+        fields: ['po_number', 'po_date', 'created_by', 'entries'],
         message: 'Missing required fields',
-      });
-    }
-
-    // --- Validasi Keberadaan Supplier ---
-    const supplier = await Supplier.findByPk(supplier_id, { transaction });
-    if (!supplier) {
-      await transaction.rollback();
-      return responseHandler(res, 404, 'fail', `Pemasok dengan ID ${supplier_id} tidak ditemukan.`, null, {
-        fields: ['supplier_id'],
-        message: 'Supplier not found',
-      });
-    }
-
-    // --- Validasi Keberadaan User (created_by) ---
-    const user = await User.findByPk(created_by, { transaction });
-    if (!user) {
-      await transaction.rollback();
-      return responseHandler(res, 404, 'fail', `Pengguna dengan ID ${created_by} tidak ditemukan.`, null, {
-        fields: ['created_by'],
-        message: 'User not found',
+        body: po_number,
       });
     }
 
@@ -99,19 +81,24 @@ exports.createPurchaseOrder = async (req, res) => {
     // --- Buat Purchase Order Header ---
     const newPO = await PurchaseOrder.create({
       po_number,
-      order_date,
-      supplier_id,
-      expected_delivery_date,
-      status: status || 'Pending', // Default status jika tidak disediakan
+      po_date,
+      warehouse_id,
+      status: status || 'Draft', // Default status jika tidak disediakan
       total_amount: calculatedTotalAmount, // Gunakan total yang dihitung
       notes,
       created_by,
+      project,
+      sdip_number: req.body.sdip_number || null,
+      tonnage: req.body.tonnage || 0,
+      value: calculatedTotalAmount,
+      responsible_person_id: req.body.responsible_person_id || null,
+      expected_delivery_date,
     }, { transaction });
 
     // --- Tambahkan purchase_order_id ke setiap entri ---
     const entriesToCreate = poEntriesData.map(entry => ({
       ...entry,
-      purchase_order_id: newPO.purchase_order_id,
+      purchase_order_id: newPO.po_id,
     }));
 
     // --- Buat Purchase Order Entries ---
@@ -120,14 +107,30 @@ exports.createPurchaseOrder = async (req, res) => {
     await transaction.commit(); // Commit transaksi
 
     // Ambil PO lengkap dengan entri dan relasi untuk respons
-    const createdPOWithDetails = await PurchaseOrder.findByPk(newPO.purchase_order_id, {
+    const createdPOWithDetails = await PurchaseOrder.findByPk(newPO.po_id, {
       include: [
-        { model: Supplier, as: 'supplier', attributes: ['supplier_id', 'supplier_name'] },
         { model: User, as: 'creator', attributes: ['user_id', 'username'] },
         {
           model: PurchaseOrderEntry,
           as: 'entries',
           include: [{ model: Item, as: 'item', attributes: ['item_id', 'item_name', 'unit_of_measure'] }],
+        },
+        {
+          model: WorkingOrder,
+          as: 'workingOrders',
+          include: [
+            { model: Warehouse, as: 'originWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+            { model: Warehouse, as: 'destinationWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+            { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+          ],
+        },
+        {
+          model: PoExpense,
+          as: 'poExpenses',
+          include: [
+            { model: PoExpenseDetail, as: 'details' },
+            { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+          ],
         },
       ],
     });
@@ -154,15 +157,26 @@ exports.getAllPurchaseOrders = async (req, res) => {
     const { count, rows: purchaseOrders } = await PurchaseOrder.findAndCountAll({
       where: whereClause,
       include: [
-        { model: Supplier, as: 'supplier', attributes: ['supplier_id', 'supplier_name'] },
         { model: User, as: 'creator', attributes: ['user_id', 'username'] },
         {
-          model: PurchaseOrderEntry,
-          as: 'entries',
-          include: [{ model: Item, as: 'item', attributes: ['item_id', 'item_name', 'unit_of_measure'] }],
+          model: WorkingOrder,
+          as: 'workingOrders',
+          include: [
+            { model: Warehouse, as: 'originWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+            { model: Warehouse, as: 'destinationWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+            { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+          ],
+        },
+        {
+          model: PoExpense,
+          as: 'poExpenses',
+          include: [
+            { model: PoExpenseDetail, as: 'details' },
+            { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+          ],
         },
       ],
-      order: [['order_date', 'DESC']],
+      order: [['po_date', 'DESC']],
       limit: parseInt(limit),
       offset: offset,
     });
@@ -192,12 +206,28 @@ exports.getPurchaseOrderById = async (req, res) => {
 
     const purchaseOrder = await PurchaseOrder.findByPk(id, {
       include: [
-        { model: Supplier, as: 'supplier', attributes: ['supplier_id', 'supplier_name'] },
         { model: User, as: 'creator', attributes: ['user_id', 'username'] },
         {
           model: PurchaseOrderEntry,
           as: 'entries',
           include: [{ model: Item, as: 'item', attributes: ['item_id', 'item_name', 'unit_of_measure'] }],
+        },
+        {
+          model: WorkingOrder,
+          as: 'workingOrders',
+          include: [
+            { model: Warehouse, as: 'originWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+            { model: Warehouse, as: 'destinationWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+            { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+          ],
+        },
+        {
+          model: PoExpense,
+          as: 'poExpenses',
+          include: [
+            { model: PoExpenseDetail, as: 'details' },
+            { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+          ],
         },
       ],
     });
@@ -220,7 +250,7 @@ exports.updatePurchaseOrder = async (req, res) => {
     const { id } = req.params;
     const {
       po_number,
-      order_date,
+      po_date,
       supplier_id,
       expected_delivery_date,
       status,
@@ -249,7 +279,7 @@ exports.updatePurchaseOrder = async (req, res) => {
     // --- Cek Duplikasi Nomor PO jika diubah ---
     if (po_number && po_number !== purchaseOrder.po_number) {
       const existingPO = await PurchaseOrder.findOne({ where: { po_number }, transaction });
-      if (existingPO && existingPO.purchase_order_id !== id) {
+      if (existingPO && existingPO.po_id !== id) {
         await transaction.rollback();
         return responseHandler(res, 409, 'error', 'Nomor PO sudah terdaftar.', null, {
           fields: ['po_number'],
@@ -348,7 +378,7 @@ exports.updatePurchaseOrder = async (req, res) => {
     await PurchaseOrder.update(
       {
         po_number: po_number || purchaseOrder.po_number,
-        order_date: order_date || purchaseOrder.order_date,
+        po_date: po_date || purchaseOrder.po_date,
         supplier_id: supplier_id || purchaseOrder.supplier_id,
         expected_delivery_date: expected_delivery_date || purchaseOrder.expected_delivery_date,
         status: status || purchaseOrder.status,
@@ -356,7 +386,7 @@ exports.updatePurchaseOrder = async (req, res) => {
         notes: notes !== undefined ? notes : purchaseOrder.notes, // Izinkan notes menjadi null
       },
       {
-        where: { purchase_order_id: id },
+        where: { po_id: id },
         transaction,
       }
     );
@@ -373,6 +403,23 @@ exports.updatePurchaseOrder = async (req, res) => {
           as: 'entries',
           include: [{ model: Item, as: 'item', attributes: ['item_id', 'item_name', 'unit_of_measure'] }],
         },
+        {
+          model: WorkingOrder,
+          as: 'workingOrders',
+          include: [
+            { model: Warehouse, as: 'originWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+            { model: Warehouse, as: 'destinationWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+            { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+          ],
+        },
+        {
+          model: PoExpense,
+          as: 'poExpenses',
+          include: [
+            { model: PoExpenseDetail, as: 'details' },
+            { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+          ],
+        },
       ],
     });
 
@@ -383,7 +430,6 @@ exports.updatePurchaseOrder = async (req, res) => {
     return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat memperbarui Purchase Order.', null, error.message);
   }
 };
-
 
 // --- FUNGSI UNTUK MENGHAPUS PURCHASE ORDER BESERTA ENTRI ITEMNYA ---
 exports.deletePurchaseOrder = async (req, res) => {
@@ -405,7 +451,7 @@ exports.deletePurchaseOrder = async (req, res) => {
 
     // Kemudian, hapus header PO
     const deletedRows = await PurchaseOrder.destroy({
-      where: { purchase_order_id: id },
+      where: { po_id: id },
       transaction,
     });
 
@@ -493,7 +539,7 @@ exports.payPurchaseOrder = async (req, res) => {
       total_amount: amount,
       notes: notes,
       created_by: req.user.id, // Ambil user_id dari token JWT
-      related_po_id: purchaseOrder.purchase_order_id,
+      related_po_id: purchaseOrder.po_id,
     }, { transaction: t });
 
     // --- Buat Entri Transaksi (Kredit akun pembayaran) ---
@@ -520,6 +566,23 @@ exports.payPurchaseOrder = async (req, res) => {
                 model: PurchaseOrderEntry,
                 as: 'entries',
                 include: [{ model: Item, as: 'item' }],
+            },
+            {
+                model: WorkingOrder,
+                as: 'workingOrders',
+                include: [
+                    { model: Warehouse, as: 'originWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+                    { model: Warehouse, as: 'destinationWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+                    { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+                ],
+            },
+            {
+                model: PoExpense,
+                as: 'poExpenses',
+                include: [
+                    { model: PoExpenseDetail, as: 'details' },
+                    { model: User, as: 'creator', attributes: ['user_id', 'username'] },
+                ],
             },
         ],
     });
