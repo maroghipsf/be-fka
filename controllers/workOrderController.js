@@ -101,21 +101,35 @@ exports.getAllWorkOrdersByIdPO = async (req, res) => {
     const wos = await WO.findAll({
       where: { po_id: idPO },
       include: [
-        { model: PO, as: 'po', as: 'purchaseOrder', attributes: ['po_id', 'status_po', 'project', 'sdip_no', 'party_ton', 'po_date', 'description'] },
-        { model: Warehouse , as: 'senderWarehouse', attributes: ['warehouse_id', 'warehouse_name'] },
-        { model: Warehouse , as: 'receiverWarehouse', attributes: ['warehouse_id', 'warehouse_name'] }
+        { model: PO, as: 'purchaseOrder', attributes: ['po_id', 'status_po', 'project', 'sdip_no', 'party_ton', 'po_date', 'description'] },
+        { model: Warehouse , as: 'sender_warehouse', attributes: ['warehouse_id', 'warehouse_name'] },
+        { model: Warehouse , as: 'receiver_warehouse', attributes: ['warehouse_id', 'warehouse_name'] }
       ],
-      order: [['createdAt', 'DESC']] 
+      order: [['createdAt', 'DESC']]
     });
 
+    // If no WO found, return an empty array with 200 OK status
     if (!wos || wos.length === 0) {
-      return responseHandler(res, 404, 'fail', 'Tidak ada data akun ditemukan.');
+      return responseHandler(res, 200, 'success', 'Tidak ada Working Order ditemukan untuk PO ini.', []);
     }
 
-    return responseHandler(res, 200, 'success', 'Data akun berhasil ditemukan.', wos);
+    return responseHandler(res, 200, 'success', 'Data Working Order berhasil ditemukan.', wos);
   } catch (error) {
     console.error('Error fetching all Work Orders:', error);
-    return responseHandler(res, 500, 'error', 'Terjadi kesalahan server saat mengambil data Work Order.', null, error.message);
+    // Log the actual error for more detailed debugging on your server console
+    console.error('Sequelize error details:', error.name, error.message, error.original);
+
+    // Provide a generic message to the client, but log details for yourself
+    let clientErrorMessage = 'Terjadi kesalahan server saat mengambil data Working Order.';
+    if (error.name === 'SequelizeValidationError') {
+        clientErrorMessage = 'Validasi data gagal: ' + error.message;
+    } else if (error.name === 'SequelizeDatabaseError' && error.original) {
+        clientErrorMessage = 'Kesalahan database: ' + error.original.message;
+    } else if (error.message.includes('alias')) {
+        clientErrorMessage = 'Kesalahan konfigurasi alias model di server. Mohon hubungi administrator.';
+    }
+
+    return responseHandler(res, 500, 'error', clientErrorMessage, null, error.message);
   }
 };
 

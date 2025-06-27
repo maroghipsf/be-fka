@@ -7,9 +7,8 @@ module.exports = (sequelize, DataTypes) => {
     static associate(models) {
       // WO belongs to one PO. The alias 'purchaseOrder' is correctly used here.
       WO.belongsTo(models.PO, {
-        foreignKey: 'po_id',
-        as: 'purchaseOrder', // Alias for when querying WOs and including PO
-        onDelete: 'CASCADE' // If the associated PO is deleted, this WO is also deleted
+          foreignKey: 'po_id',
+          as: 'purchaseOrder' // <-- This is the alias for PO
       });
 
       // WO has many Logistic Events
@@ -27,19 +26,15 @@ module.exports = (sequelize, DataTypes) => {
       });
 
       // WO belongs to a sender Warehouse
-      WO.belongsTo(models.Warehouse, {
-        foreignKey: 'sender_warehouse_id',
-        as: 'senderWarehouse', // Alias for the sender warehouse
-        comment: 'Kunci asing yang menghubungkan ke tabel Warehouses sebagai gudang pengirim.',
-        onDelete: 'SET NULL' // If sender warehouse is deleted, set sender_warehouse_id to NULL
+      WO.belongsTo(models.Warehouse, { // Opsional, uncomment jika Anda menggunakan tabel Warehouse
+          foreignKey: 'sender_warehouse_id',
+          as: 'sender_warehouse', // <-- This is the alias for senderWarehouse
+          comment: 'Kunci asing yang menghubungkan ke tabel Warehouses.'
       });
-
-      // WO belongs to a receiver Warehouse
-      WO.belongsTo(models.Warehouse, {
-        foreignKey: 'receiver_warehouse_id',
-        as: 'receiverWarehouse', // Alias for the receiver warehouse
-        comment: 'Kunci asing yang menghubungkan ke tabel Warehouses sebagai gudang penerima.',
-        onDelete: 'SET NULL' // If receiver warehouse is deleted, set receiver_warehouse_id to NULL
+      WO.belongsTo(models.Warehouse, { // Opsional, uncomment jika Anda menggunakan tabel Warehouse
+          foreignKey: 'receiver_warehouse_id',
+          as: 'receiver_warehouse', // <-- This is the alias for receiverWarehouse
+          comment: 'Kunci asing yang menghubungkan ke tabel Warehouses.'
       });
     }
   }
