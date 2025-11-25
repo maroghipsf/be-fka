@@ -17,6 +17,7 @@ const interestConfigurationRoutes = require('./routes/interestConfigurationRoute
 const taxConfigurationRoutes = require('./routes/taxConfigurationRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
 const workOrderRoutes = require('./routes/workOrderRoutes');
+const woLogisticEventRoutes = require('./routes/woLogisticEventRoutes');
 
 app.use(express.json());
 app.use(cors());
@@ -33,6 +34,7 @@ app.use('/api/interest-configs', interestConfigurationRoutes);
 app.use('/api/tax-configurations', taxConfigurationRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/working-orders', workOrderRoutes);
+app.use('/api/wo-logistic-events', woLogisticEventRoutes);
 
 app.get('/', (req, res) => {
   res.send('Finance App is running 🚀');
